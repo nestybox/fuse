@@ -1,4 +1,4 @@
-module github.com/nestybox/sysvisor-fs/bazil
+module github.com/nestybox/sysbox-fs/bazil
 
 go 1.13
 
