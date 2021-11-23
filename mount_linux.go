@@ -11,6 +11,10 @@ import (
 	"syscall"
 )
 
+const (
+	errNoChildProcesses = "wait: no child processes"
+)
+
 func handleFusermountStderr(errCh chan<- error) func(line string) (ignore bool) {
 	return func(line string) (ignore bool) {
 		if line == `fusermount: failed to open /etc/fuse.conf: Permission denied` {
@@ -91,8 +95,13 @@ func mount(dir string, conf *mountConfig, ready chan<- struct{}, errp *error) (f
 	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("fusermount: %v", err)
+		// If the process succeeded, don't consider "no child process" as an error;
+		// see https://github.com/kubernetes/kubernetes/issues/103753.
+		if !(err.Error() == errNoChildProcesses && cmd.ProcessState.Success()) {
+			return nil, fmt.Errorf("fusermount: %v", err)
+		}
 	}
+
 	helperErrCh := make(chan error, 1)
 	wg.Add(2)
 	go lineLogger(&wg, "mount helper output", neverIgnoreLine, stdout)
