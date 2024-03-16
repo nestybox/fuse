@@ -1561,7 +1561,7 @@ type Attr struct {
 }
 
 func (a Attr) String() string {
-	return fmt.Sprintf("valid=%v ino=%v size=%d mode=%v", a.Valid, a.Inode, a.Size, a.Mode)
+	return fmt.Sprintf("valid=%v ino=%v size=%d mode=%v uid=%d gid=%d", a.Valid, a.Inode, a.Size, a.Mode, a.Uid, a.Gid)
 }
 
 func unixTime(t time.Time) (sec uint64, nsec uint32) {
