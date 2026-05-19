@@ -60,6 +60,13 @@ func isBoringFusermountError(err error) bool {
 }
 
 func mount(dir string, conf *mountConfig) (fusefd *os.File, err error) {
+	// When running as root we can call mount(2) directly and skip the
+	// fusermount3 helper. This removes the runtime dependency on the
+	// fusermount3 binary for privileged daemons.
+	if os.Geteuid() == 0 {
+		return directMount(dir, conf)
+	}
+
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		return nil, fmt.Errorf("socketpair error: %v", err)
@@ -152,5 +159,60 @@ func mount(dir string, conf *mountConfig) (fusefd *os.File, err error) {
 		return nil, fmt.Errorf("wanted 1 fd; got %#v", gotFds)
 	}
 	f := os.NewFile(uintptr(gotFds[0]), "/dev/fuse")
+	return f, nil
+}
+
+// kernelMountOptions is the set of options accepted by the kernel FUSE
+// driver. Everything else in mountConfig.options is parsed by
+// fusermount3/libfuse in userspace and would be rejected by mount(2).
+var kernelMountOptions = map[string]struct{}{
+	"allow_other":         {},
+	"default_permissions": {},
+	"max_read":            {},
+	"blksize":             {},
+}
+
+func directMount(dir string, conf *mountConfig) (*os.File, error) {
+	f, err := os.OpenFile("/dev/fuse", os.O_RDWR, 0o000)
+	if err != nil {
+		return nil, err
+	}
+
+	var st syscall.Stat_t
+	if err := syscall.Stat(dir, &st); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("stat %s: %v", dir, err)
+	}
+	rootmode := st.Mode & syscall.S_IFMT
+
+	parts := []string{
+		fmt.Sprintf("fd=%d", f.Fd()),
+		fmt.Sprintf("rootmode=%o", rootmode),
+		fmt.Sprintf("user_id=%d", os.Getuid()),
+		fmt.Sprintf("group_id=%d", os.Getgid()),
+	}
+	for k, v := range conf.options {
+		if _, ok := kernelMountOptions[k]; !ok {
+			continue
+		}
+		if v == "" {
+			parts = append(parts, k)
+		} else {
+			parts = append(parts, k+"="+v)
+		}
+	}
+	opts := strings.Join(parts, ",")
+
+	source := conf.options["fsname"]
+	if source == "" {
+		source = "fuse"
+	}
+
+	flags := uintptr(syscall.MS_NOSUID | syscall.MS_NODEV)
+	if err := syscall.Mount(source, dir, "fuse", flags, opts); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("fuse mount at %s: %v", dir, err)
+	}
+
 	return f, nil
 }
