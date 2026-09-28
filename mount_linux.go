@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	errNoChildProcesses = "wait: no child processes"
+	errNoChildProcesses = "no child processes"
 )
 
 func handleFusermountStderr(errCh chan<- error) func(line string) (ignore bool) {
@@ -94,7 +94,7 @@ func mount(dir string, conf *mountConfig) (fusefd *os.File, err error) {
 	if err := cmd.Start(); err != nil {
 		// If the process succeeded, don't consider "no child process" as an error;
 		// see https://github.com/kubernetes/kubernetes/issues/103753.
-		if !(err.Error() == errNoChildProcesses && cmd.ProcessState.Success()) {
+		if !(strings.HasSuffix(err.Error(), errNoChildProcesses) && cmd.ProcessState.Success()) {
 			return nil, fmt.Errorf("fusermount: %v", err)
 		}
 	}
