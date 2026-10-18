@@ -3,10 +3,19 @@ package fuse
 import (
 	"bytes"
 	"errors"
+	"os"
 	"os/exec"
+	"syscall"
 )
 
 func unmount(dir string) error {
+	if os.Geteuid() == 0 {
+		if err := syscall.Unmount(dir, 0); err != nil {
+			return &os.PathError{Op: "unmount", Path: dir, Err: err}
+		}
+		return nil
+	}
+
 	cmd := exec.Command("fusermount3", "-u", dir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
