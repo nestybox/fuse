@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -163,8 +164,7 @@ func mount(dir string, conf *mountConfig) (fusefd *os.File, err error) {
 }
 
 // kernelMountOptions is the set of options accepted by the kernel FUSE
-// driver. Everything else in mountConfig.options is parsed by
-// fusermount3/libfuse in userspace and would be rejected by mount(2).
+// driver and passed through in the mount(2) data string.
 var kernelMountOptions = map[string]struct{}{
 	"allow_other":         {},
 	"default_permissions": {},
@@ -172,7 +172,89 @@ var kernelMountOptions = map[string]struct{}{
 	"blksize":             {},
 }
 
+// mountFlagOptions maps options that fusermount3 turns into mount(2)
+// flags (see mount_flags in libfuse util/fusermount.c). set=true adds
+// the flag, set=false clears it.
+var mountFlagOptions = map[string]struct {
+	flag uintptr
+	set  bool
+}{
+	"ro":   {syscall.MS_RDONLY, true},
+	"dev":  {syscall.MS_NODEV, false},
+	"suid": {syscall.MS_NOSUID, false},
+}
+
+// directMountParams holds the mount(2) arguments derived from a
+// mountConfig, excluding the per-mount fd and rootmode.
+type directMountParams struct {
+	source string
+	fstype string
+	flags  uintptr
+	data   []string
+}
+
+// getDirectMountParams translates conf.options into mount(2) arguments
+// the way fusermount3 does. Any option it cannot honor is an error, so
+// the direct path fails closed instead of silently producing a mount
+// with weaker semantics than the fusermount3 path would.
+func getDirectMountParams(conf *mountConfig) (*directMountParams, error) {
+	p := &directMountParams{
+		source: "fuse",
+		fstype: "fuse",
+		flags:  syscall.MS_NOSUID | syscall.MS_NODEV,
+	}
+
+	keys := make([]string, 0, len(conf.options))
+	for k := range conf.options {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var unsupported []string
+	for _, k := range keys {
+		v := conf.options[k]
+		switch k {
+		case "fsname":
+			if v != "" {
+				p.source = v
+			}
+			continue
+		case "subtype":
+			if v != "" {
+				p.fstype = "fuse." + v
+			}
+			continue
+		}
+		if mf, ok := mountFlagOptions[k]; ok && v == "" {
+			if mf.set {
+				p.flags |= mf.flag
+			} else {
+				p.flags &^= mf.flag
+			}
+			continue
+		}
+		if _, ok := kernelMountOptions[k]; ok {
+			if v == "" {
+				p.data = append(p.data, k)
+			} else {
+				p.data = append(p.data, k+"="+v)
+			}
+			continue
+		}
+		unsupported = append(unsupported, k)
+	}
+	if len(unsupported) > 0 {
+		return nil, fmt.Errorf("mount options not supported when mounting directly as root: %s", strings.Join(unsupported, ", "))
+	}
+	return p, nil
+}
+
 func directMount(dir string, conf *mountConfig) (*os.File, error) {
+	p, err := getDirectMountParams(conf)
+	if err != nil {
+		return nil, err
+	}
+
 	f, err := os.OpenFile("/dev/fuse", os.O_RDWR, 0o000)
 	if err != nil {
 		return nil, err
@@ -191,25 +273,10 @@ func directMount(dir string, conf *mountConfig) (*os.File, error) {
 		fmt.Sprintf("user_id=%d", os.Getuid()),
 		fmt.Sprintf("group_id=%d", os.Getgid()),
 	}
-	for k, v := range conf.options {
-		if _, ok := kernelMountOptions[k]; !ok {
-			continue
-		}
-		if v == "" {
-			parts = append(parts, k)
-		} else {
-			parts = append(parts, k+"="+v)
-		}
-	}
+	parts = append(parts, p.data...)
 	opts := strings.Join(parts, ",")
 
-	source := conf.options["fsname"]
-	if source == "" {
-		source = "fuse"
-	}
-
-	flags := uintptr(syscall.MS_NOSUID | syscall.MS_NODEV)
-	if err := syscall.Mount(source, dir, "fuse", flags, opts); err != nil {
+	if err := syscall.Mount(p.source, dir, p.fstype, p.flags, opts); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("fuse mount at %s: %v", dir, err)
 	}
